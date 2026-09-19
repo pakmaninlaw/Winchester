@@ -1,11 +1,10 @@
 """
-ВИНЧЕСТЕРЪ | Оружейная колбасная гильдия. Финальный монолит. Редакция 10.
+ВИНЧЕСТЕРЪ | Оружейная колбасная гильдия. Финальный монолит. Редакция 11.
 СЛОИ: 1 домен | 2 подстановка нейрофото + заглушка | 3 контроллеры
-      | 4 представление | 5 авто-QA и точка входа.
+| 4 представление | 5 авто-QA и точка входа.
 Бизнес-логика только в слое 1; фронтенд лишь перерисовывает ответ сервера.
-РЕД. 10 (решение СА): оверлеи добавок поверх нейрофото УДАЛЕНЫ ПОЛНОСТЬЮ --
-кадр всегда чистый; добавки влияют только на цену, граммы и корзину.
-Цепочка кадра: файл пары (мясо,технология) -> байты в браузер; нет файла -> заглушка.
+РЕД. 11: все ассеты в .jpg (сжатие); комментарий клиента в заявке;
+ключи словарей без хвостовых пробелов; единственный обработчик отправки формы.
 """
 import io
 import json
@@ -19,77 +18,85 @@ import webbrowser
 from dataclasses import dataclass, asdict
 from datetime import date, datetime, timedelta
 from threading import Timer
-
 from flask import Flask, render_template_string, request, jsonify, send_file, abort
+from markupsafe import escape
 from PIL import Image, ImageDraw
 
 app = Flask(__name__)
-
-BUILD = "ред. 10 (финальный монолит)"
+BUILD = "ред. 11 (jpg-ассеты, комментарий в заявке)"
 PORT = 5000
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # деплой: пути от файла, не от cwd
+
+
 def _asset(name): return os.path.join(BASE_DIR, name)
+
+
 ORDERS_FILE = _asset("winchester_orders.json")
 BANNER_FILE = _asset("banner.jpg")
 BANNER_URL = "https://lh3.googleusercontent.com/d/1GDlW_Cvmf2vQGLptNfH_XkvtPTmY3g6I"
 
 # Нейрофото срезов: базовые пары мясо+технология. Нет файла -> заглушка.
 PHOTOS = {
-    ("beef", "cured"): "slice_beef_cured.png",
-    ("beef", "smoked"): "slice_beef_smoked.png",
-    ("beef", "halfsmoked"): "slice_beef_halfsmoked.png",
-    ("beef", "boiled"): "slice_beef_boiled.png",
-    ("pork", "cured"): "slice_pork_cured.png",
-    ("pork", "smoked"): "slice_pork_smoked.png",
-    ("pork", "halfsmoked"): "slice_pork_halfsmoked.png",
-    ("pork", "boiled"): "slice_pork_boiled.png",
-    ("turkey", "cured"): "slice_turkey_cured.png",
-    ("turkey", "smoked"): "slice_turkey_smoked.png",
-    ("turkey", "halfsmoked"): "slice_turkey_halfsmoked.png",
-    ("turkey", "boiled"): "slice_turkey_boiled.png",
-}
-# Эталоны гастрономических наборов под напитки (пресеты).
-SETS = {
-    "red_wine": "set_red_wine.png",
-    "white_wine": "set_white_wine.png",
-    "cognac": "set_cognac.png",
-    "pepper_vodka": "set_pepper_vodka.png",
+    ("beef", "cured"): "slice_beef_cured.jpg",
+    ("beef", "smoked"): "slice_beef_smoked.jpg",
+    ("beef", "halfsmoked"): "slice_beef_halfsmoked.jpg",
+    ("beef", "boiled"): "slice_beef_boiled.jpg",
+    ("pork", "cured"): "slice_pork_cured.jpg",
+    ("pork", "smoked"): "slice_pork_smoked.jpg",
+    ("pork", "halfsmoked"): "slice_pork_halfsmoked.jpg",
+    ("pork", "boiled"): "slice_pork_boiled.jpg",
+    ("turkey", "cured"): "slice_turkey_cured.jpg",
+    ("turkey", "smoked"): "slice_turkey_smoked.jpg",
+    ("turkey", "halfsmoked"): "slice_turkey_halfsmoked.jpg",
+    ("turkey", "boiled"): "slice_turkey_boiled.jpg",
 }
 
+# Эталоны гастрономических наборов под напитки (пресеты).
+SETS = {
+    "red_wine": "set_red_wine.jpg",
+    "white_wine": "set_white_wine.jpg",
+    "cognac": "set_cognac.jpg",
+    "pepper_vodka": "set_pepper_vodka.jpg",
+}
 
 # ============================================================================
 # СЛОЙ 1. ДОМЕН И БИЗНЕС-ПРАВИЛА
 # ============================================================================
 MEATS = {
-    "beef":   {"label": "Говядина Black Angus", "price_per_kg": 2900, "flesh": (90, 22, 30)},
-    "pork":   {"label": "Фермерская свинина",   "price_per_kg": 2200, "flesh": (142, 57, 66)},
-    "turkey": {"label": "Фермерская индейка",   "price_per_kg": 2400, "flesh": (196, 121, 128)},
+    "beef": {"label": "Говядина Black Angus", "price_per_kg": 2900, "flesh": (90, 22, 30)},
+    "pork": {"label": "Фермерская свинина", "price_per_kg": 2200, "flesh": (142, 57, 66)},
+    "turkey": {"label": "Фермерская индейка", "price_per_kg": 2400, "flesh": (196, 121, 128)},
 }
+
 # icon_w/icon_h -- горизонтальная миниатюра патрона, пропорционально калибру.
 CALIBERS = {
-    "410": {"label": "Калибр .410 (Дегустационный)", "weight_g": 500,  "days_bonus": 0,  "icon_w": 26, "icon_h": 9},
-    "20":  {"label": "20 калибр (Ходовой патрон)",   "weight_g": 1200, "days_bonus": 0,  "icon_w": 30, "icon_h": 12},
-    "16":  {"label": "16 калибр (Двойной заряд)",    "weight_g": 2000, "days_bonus": 5,  "icon_w": 32, "icon_h": 14},
-    "12":  {"label": "12 калибр (Магнум)",           "weight_g": 3000, "days_bonus": 10, "icon_w": 34, "icon_h": 16},
+    "410": {"label": "Калибр .410 (Дегустационный)", "weight_g": 500, "days_bonus": 0, "icon_w": 26, "icon_h": 9},
+    "20": {"label": "20 калибр (Ходовой патрон)", "weight_g": 1200, "days_bonus": 0, "icon_w": 30, "icon_h": 12},
+    "16": {"label": "16 калибр (Двойной заряд)", "weight_g": 2000, "days_bonus": 5, "icon_w": 32, "icon_h": 14},
+    "12": {"label": "12 калибр (Магнум)", "weight_g": 3000, "days_bonus": 10, "icon_w": 34, "icon_h": 16},
 }
+
 TECHS = {
-    "cured":      {"label": "Сыровяленая в благородной плесени", "base_days": 45, "markup_per_kg": 450},
-    "smoked":     {"label": "Сырокопченая на ольховой щепе",     "base_days": 30, "markup_per_kg": 300},
-    "halfsmoked": {"label": "Охотничья варено-копченая",         "base_days": 5,  "markup_per_kg": 150},
-    "boiled":     {"label": "Деликатесная вареная",              "base_days": 2,  "markup_per_kg": 0},
+    "cured": {"label": "Сыровяленая в благородной плесени", "base_days": 45, "markup_per_kg": 450},
+    "smoked": {"label": "Сырокопченая на ольховой щепе", "base_days": 30, "markup_per_kg": 300},
+    "halfsmoked": {"label": "Охотничья варено-копченая", "base_days": 5, "markup_per_kg": 150},
+    "boiled": {"label": "Деликатесная вареная", "base_days": 2, "markup_per_kg": 0},
 }
+
 # price -- цена добавки при эталонной партии 1.2 кг; share -- доля в техкарте.
 ADDONS = {
     "pistachio": {"label": "Сицилийская цельная фисташка", "price": 250, "share": 0.05},
-    "truffle":   {"label": "Стружка черного трюфеля",      "price": 450, "share": 0.02},
-    "cheese":    {"label": "Выдержанный пармезан 24 мес.", "price": 300, "share": 0.06},
-    "tomato":    {"label": "Вяленые томаты с розмарином",  "price": 200, "share": 0.04},
+    "truffle": {"label": "Стружка черного трюфеля", "price": 450, "share": 0.02},
+    "cheese": {"label": "Выдержанный пармезан 24 мес.", "price": 300, "share": 0.06},
+    "tomato": {"label": "Вяленые томаты с розмарином", "price": 200, "share": 0.04},
 }
+
 REF_WEIGHT_KG = 1.2     # точка фиксации цен добавок (правило СА)
 TUBE_PRICE = 650        # тубус -- физический предмет: цена фиксирована
 SALT_SHARE = 0.022      # БИЗНЕС-ПРАВИЛО: соль = ровно 2.2% базовой массы
 ADDON_KEYS = tuple(ADDONS.keys())
-PHONE_RE = re.compile(r"^[0-9+()\- ]{6,20}$")
+# ВАЖНО: пробел ВНУТРИ квадратных скобок -- намеренный (телефон может содержать пробел).
+PHONE_RE = re.compile(r"^[0-9+() -]{6,20}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
 
 
@@ -241,10 +248,10 @@ PRESETS = [
 for _p in PRESETS:
     _p["patch_json"] = json.dumps(_p["patch"], ensure_ascii=False)
 
-
 # ============================================================================
 # СЛОЙ 2. ПОДСТАНОВКА НЕЙРОФОТО + ЗАГЛУШКА (без оверлеев по решению СА ред. 10)
 # ============================================================================
+
 
 def _stub_png() -> bytes:
     """Премиальная заглушка (правка СА #4): рамка + текст вместо среза."""
@@ -253,7 +260,8 @@ def _stub_png() -> bytes:
     d.rectangle([10, 10, 389, 389], outline=(216, 170, 99, 255), width=2)
     d.rectangle([18, 18, 381, 381], outline=(84, 44, 27, 255), width=1)
     d.multiline_text((62, 140),
-                     "По техническим причинам\nмы не можем показать вам\nвид готового продукта.\n\nРецепт уже у мастера --\nпартия будет сфотографирована\nпосле созревания.",
+                     "По техническим причинам\nмы не можем показать вам\nвид готового продукта.\n\n"
+                     "Рецепт уже у мастера --\nпартия будет сфотографирована\nпосле созревания.",
                      fill=(212, 217, 220, 255))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -261,7 +269,7 @@ def _stub_png() -> bytes:
 
 
 def _resolve_asset(name):
-    """Поиск файла терпимо: точное совпадение (пробелы/регистр), затем по стежню --
+    """Поиск файла терпимо: точное совпадение (пробелы/регистр), затем по стеблю --
     лечит двойные расширения, мусор в хвосте и полноширинные точки после нейросетей."""
     if not name:
         return None
@@ -282,7 +290,7 @@ def _resolve_asset(name):
 
 
 def _mime(path: str) -> str:
-    """Mimetype по сигнатуре байтов: JFIF-в-.png уходит как image/jpeg."""
+    """Mimetype по сигнатуре байтов: файл .png с jpeg-внутренностями уйдёт как image/jpeg."""
     with open(path, "rb") as f:
         head = f.read(3)
     if head == b"\x89PN":
@@ -293,9 +301,8 @@ def _mime(path: str) -> str:
 
 
 def render_slice(cfg: Config) -> bytes:
-    """ДИСПЕТЧЕР (ред. 10): чистое нейрофото пары (мясо,технология) байтами.
-    Добавки по решению СА кадр НЕ меняют (никаких пикселей поверх).
-    Нет файла -> премиальная заглушка. ГАРАНТИРОВАННЫЙ возврат."""
+    """ДИСПЕТЧЕР: чистое нейрофото пары (мясо,технология) байтами.
+    Добавки кадр НЕ меняют. Нет файла -> премиальная заглушка. ГАРАНТИРОВАННЫЙ возврат."""
     photo = PHOTOS.get((cfg.meat, cfg.tech))
     path = _resolve_asset(photo) if photo else None
     if path:
@@ -307,7 +314,6 @@ def render_slice(cfg: Config) -> bytes:
 # ============================================================================
 # СЛОЙ 3. HTTP-КОНТРОЛЛЕРЫ
 # ============================================================================
-
 _orders_lock = threading.Lock()
 
 
@@ -334,7 +340,11 @@ def _validate_contact(payload):
     email = str(payload.get("email", "")).strip()
     if not EMAIL_RE.match(email):
         errors["email"] = "Укажите почту в формате name@domain.ru."
-    return name, phone, email, errors
+    # Комментарий необязателен; ограничиваем длину, чтобы не раздувать журнал.
+    comment = str(payload.get("comment", "")).strip()
+    if len(comment) > 500:
+        comment = comment[:500]
+    return name, phone, email, comment, errors
 
 
 def slice_query(cfg: Config) -> str:
@@ -369,7 +379,7 @@ def slice_png():
     if not png:
         png = _stub_png()   # двойная страховка: кадр не может стать None
     mt = "image/png" if png[:8] == b"\x89PNG\r\n\x1a\n" else (
-         "image/jpeg" if png[:2] == b"\xff\xd8" else "application/octet-stream")
+        "image/jpeg" if png[:2] == b"\xff\xd8" else "application/octet-stream")
     response = app.response_class(png, mimetype=mt)
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -384,7 +394,7 @@ def quote():
 @app.route("/api/order", methods=["POST"])
 def order():
     payload = request.get_json(silent=True) or {}
-    name, phone, email, errors = _validate_contact(payload)
+    name, phone, email, comment, errors = _validate_contact(payload)
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
     cfg = parse_config(payload)
@@ -392,16 +402,23 @@ def order():
     with _orders_lock:
         orders = _load_orders()
         order_no = f"#048-{len(orders) + 1:04d}"
-        orders.append({"order_no": order_no,
-                       "created": datetime.now().isoformat(timespec="seconds"),
-                       "contact": {"name": name, "phone": phone, "email": email},
-                       "config": asdict(cfg), "total": q["price"]["total"]})
+        orders.append({
+            "order_no": order_no,
+            "created": datetime.now().isoformat(timespec="seconds"),
+            "contact": {"name": name, "phone": phone,
+                        "email": email, "comment": comment},
+            "config": asdict(cfg),
+            "total": q["price"]["total"],
+        })
         try:
             with open(ORDERS_FILE, "w", encoding="utf-8") as f:
                 json.dump(orders, f, ensure_ascii=False, indent=2)
         except OSError as e:
             return jsonify({"ok": False, "errors": {"phone": f"Журнал недоступен: {e}"}}), 500
-    print(f"[ЗАЯВКА] {order_no} | {name} | {q['summary']} | итог {q['price']['total_fmt']}")
+        print(f"[ЗАЯВКА] {order_no} | {name} | {phone} | {email}")
+        if comment:
+            print(f"           Комментарий: {comment}")
+        print(f"           {q['summary']} | итог {q['price']['total_fmt']}")
     return jsonify({"ok": True, "order_no": order_no})
 
 
@@ -415,7 +432,7 @@ def set_png(key):
 
 @app.route("/tube.png")
 def tube_png():
-    path = _resolve_asset("pack_tube.png")
+    path = _resolve_asset("pack_tube.jpg")
     if not path:
         abort(404)
     return send_file(path, mimetype=_mime(path))
@@ -428,16 +445,46 @@ def banner_local():
     return send_file(BANNER_FILE, mimetype="image/jpeg")
 
 
+@app.route("/admin/orders")
+def admin_orders():
+    """Журнал заявок таблицей. ВНИМАНИЕ: страница публичная -- не свети ссылкой."""
+    orders = _load_orders()
+    rows = []
+    for o in reversed(orders):
+        c = o.get("contact", {})
+        rows.append(
+            "<tr>"
+            f"<td>{escape(o.get('order_no', ''))}</td>"
+            f"<td>{escape(o.get('created', ''))}</td>"
+            f"<td>{escape(c.get('name', ''))}</td>"
+            f"<td>{escape(c.get('phone', ''))}</td>"
+            f"<td>{escape(c.get('email', ''))}</td>"
+            f"<td>{escape(c.get('comment', ''))}</td>"
+            f"<td>{escape(str(o.get('total', '')))} ₽</td>"
+            "</tr>")
+    html = ("<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>"
+            "<title>Журнал заявок</title>"
+            "<style>body{font-family:Arial,sans-serif;background:#0B0807;color:#D4D9DC;padding:24px;}"
+            "table{border-collapse:collapse;width:100%;font-size:13px;}"
+            "td,th{border:1px solid #542C1B;padding:7px 9px;text-align:left;}"
+            "th{color:#D8AA63;}</style></head><body>"
+            f"<h2>Заявок: {len(orders)}</h2>"
+            "<table><tr><th>№</th><th>Дата</th><th>Имя</th><th>Телефон</th>"
+            "<th>Почта</th><th>Комментарий</th><th>Итого</th></tr>"
+            + "".join(rows) + "</table></body></html>")
+    return html
+
+
 @app.route("/api/debug")
 def debug_info():
     """Форензика: что именно исполняется. Открой в браузере и пришли мне."""
     return jsonify({"build": BUILD, "python": sys.version.split()[0],
-                    "pillow": getattr(Image, "__version__", "unknown"),
+                    "pillow": getattr(Image, "version", "unknown"),
                     "orders_file": ORDERS_FILE,
                     "orders_count": len(_load_orders()),
                     "photos_found": sum(1 for p in list(PHOTOS.values()) + list(SETS.values())
-                                        + ["pack_tube.png", "banner.jpg"]
-                                        if os.path.exists(_asset(p)))})
+                                        + ["pack_tube.jpg", "banner.jpg"]
+                                        if _resolve_asset(p))})
 
 
 @app.route("/favicon.ico")
@@ -448,7 +495,6 @@ def favicon():
 # ============================================================================
 # СЛОЙ 4. ПРЕДСТАВЛЕНИЕ (HTML/CSS/JS внутри монолита)
 # ============================================================================
-
 TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -456,101 +502,101 @@ TEMPLATE = """
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ВИНЧЕСТЕРЪ | Оружейная колбасная гильдия</title>
-<script src="https://cdn.tailwindcss.com"></script>
 <style>
-  :root{--walnut:#2C1712; --frame:#542C1B; --brass:#D8AA63; --parchment:#D4D9DC;
-    --brass-dim:#9C7A45; --line:rgba(216,170,99,.22); --muted:rgba(212,217,220,.60);}
-  html,body{background:#0B0807; color:var(--parchment);
-    font-family:"Segoe UI",Arial,sans-serif; margin:0;}
-  h1,h2,h3{font-family:Georgia,"Times New Roman",serif;}
-  .wrap{max-width:1280px; margin:0 auto; padding:0 22px 60px;}
-  .hidden{display:none!important;}
-  .banner-wrapper{position:relative; background:#0B0807; display:flex;
-    justify-content:center; max-width:900px; margin:0 auto; overflow:hidden;}
-  .banner-img{display:block; width:100%;
-    -webkit-mask-image:radial-gradient(ellipse 85% 70% at 50% 50%, black 45%, transparent 96%);
-    mask-image:radial-gradient(ellipse 85% 70% at 50% 50%, black 45%, transparent 96%);}
-  .banner-wrapper::after{content:''; position:absolute; inset:0; pointer-events:none;
-    background:radial-gradient(ellipse 70% 60% at 50% 50%, transparent 35%, #0B0807 92%);}
-  .hero{background:transparent; border:none; box-shadow:none; padding:6px 0 18px;}
-  .hero-inner{max-width:1280px; margin:0 auto; padding:0 22px;
-    display:flex; align-items:center; gap:26px; flex-wrap:wrap;}
-  .emblem{width:100px; height:auto; flex:0 0 auto; opacity:.95;}
-  .brand h1{margin:0; font-size:34px; letter-spacing:.14em;}
-  .brand .sub{margin:4px 0 0; color:var(--brass); letter-spacing:.22em;
-    font-size:12px; text-transform:uppercase;}
-  .grid{display:grid; grid-template-columns:minmax(0,5fr) minmax(0,4fr); gap:26px;}
-  @media (max-width:980px){.grid{grid-template-columns:1fr;}}
-  .card{background:linear-gradient(180deg,#2C1712,#231310); border:1px solid var(--frame);
-    border-radius:14px; padding:22px; margin-bottom:22px; box-shadow:0 12px 30px rgba(0,0,0,.45);}
-  .card h2{margin:0 0 14px; font-size:19px; letter-spacing:.10em;}
-  .step{margin:34px 0 10px; padding-bottom:8px; border-bottom:1px solid var(--frame);
-    color:var(--brass); font-size:11px; letter-spacing:.18em; text-transform:uppercase;}
-  .card .step:first-of-type{margin-top:6px;}
-  .opt{display:flex; justify-content:space-between; gap:12px; align-items:center;
-    padding:8px 10px; border:1px solid transparent; border-radius:8px; cursor:pointer;}
-  .opt:hover{border-color:var(--line); background:rgba(216,170,99,.06);}
-  .opt input{accent-color:var(--brass); margin-right:10px;}
-  .opt .price{color:var(--muted); font-size:12px; white-space:nowrap;}
-  .shell{display:inline-block; vertical-align:middle; margin-right:8px; opacity:.95;}
-  #cfg input:disabled{opacity:.35; cursor:not-allowed;}
-  .btn-ghost:disabled,.btn-brass:disabled{opacity:.45; cursor:not-allowed; filter:none;}
-  .range-row{padding:8px 10px;}
-  .range-row input[type=range]{width:100%; accent-color:var(--brass);}
-  .range-head{display:flex; justify-content:space-between; font-size:13px;}
-  .range-head output{color:var(--brass); font-variant-numeric:tabular-nums;}
-  .presets{display:flex; gap:10px; flex-wrap:wrap; margin:0 0 22px;}
-  .btn-ghost{background:transparent; border:1px solid var(--brass-dim); color:var(--brass);
-    border-radius:10px; padding:9px 16px; font-size:13px; letter-spacing:.06em; cursor:pointer;}
-  .btn-ghost:hover{background:rgba(216,170,99,.12);}
-  .btn-brass{background:linear-gradient(180deg,#E7C078,#B08540); color:#1A120C;
-    border:1px solid #F0D9A6; border-radius:10px; padding:12px 22px; font-size:14px;
-    font-weight:600; letter-spacing:.08em; cursor:pointer; width:100%;}
-  .btn-brass:hover{filter:brightness(1.07);}
-  table{width:100%; border-collapse:collapse; font-size:13.5px;}
-  td{padding:7px 8px; border-bottom:1px dashed rgba(84,44,27,.85);}
-  td.num{text-align:right; font-variant-numeric:tabular-nums;}
-  td.lbl{color:rgba(212,217,220,.82);}
-  .slice-box{background:radial-gradient(circle at 50% 42%, #2C1712 0%, #0B0807 75%);
-    border:1px solid var(--frame); border-radius:12px; padding:10px; text-align:center;}
-  .slice-box img{width:100%; max-width:100%; height:auto; display:block;
-    margin:0 auto; border-radius:10px;}
-  .tube-thumb{width:130px; margin:12px auto 0; display:block;
-    border-radius:10px; border:1px solid var(--frame);}
-  .tube-stub{width:230px; margin:12px auto 0; padding:14px 12px;
-    border:1px dashed var(--brass-dim); border-radius:10px; color:var(--brass);
-    font-size:12px; letter-spacing:.06em; text-align:center; background:rgba(216,170,99,.06);}
-  .summary{margin-top:10px; color:var(--muted); font-size:12.5px;}
-  .days-big{font-size:30px; color:var(--brass);}
-  .total-big{font-size:32px; font-variant-numeric:tabular-nums;}
-  .verify-ok{border:1px solid var(--brass-dim); color:var(--brass); background:rgba(216,170,99,.08);
-    border-radius:8px; padding:9px 12px; font-size:12.5px; letter-spacing:.06em;}
-  .verify-bad{border:1px solid #7E3B32; color:#E08A7C; background:rgba(126,59,50,.12);
-    border-radius:8px; padding:9px 12px; font-size:12.5px;}
-  .muted{color:var(--muted); font-size:12.5px;}
-  footer{border-top:1px solid var(--frame); margin-top:30px; padding-top:16px;
-    color:var(--muted); font-size:12px; letter-spacing:.08em;}
-  .overlay{position:fixed; inset:0; background:rgba(5,3,2,.72); display:flex;
-    align-items:center; justify-content:center; z-index:50; padding:18px;}
-  .overlay.hidden{display:none;}
-  .modal{width:min(460px,94vw); margin:0;}
-  .modal label{display:block; margin:12px 0 4px; font-size:12px; letter-spacing:.08em;
-    color:var(--brass); text-transform:uppercase;}
-  .modal input{width:100%; box-sizing:border-box; background:#1D0F0B; border:1px solid var(--frame);
-    border-radius:8px; color:var(--parchment); padding:10px 12px; font-size:14px;}
-  .modal input:focus{outline:1px solid var(--brass-dim);}
-  .modal .row{display:flex; gap:10px; margin-top:16px;}
-  .toast{position:fixed; left:50%; bottom:34px; transform:translateX(-50%);
-    background:linear-gradient(180deg,#E7C078,#B08540); color:#1A120C;
-    border:1px solid #F0D9A6; border-radius:12px; padding:14px 26px; font-size:14px;
-    font-weight:600; letter-spacing:.06em; box-shadow:0 14px 40px rgba(0,0,0,.55);
-    z-index:60; animation:tin .35s ease;}
-  @keyframes tin{from{opacity:0; transform:translate(-50%,12px);}
-    to{opacity:1; transform:translate(-50%,0);}}
+:root{--walnut:#2C1712; --frame:#542C1B; --brass:#D8AA63; --parchment:#D4D9DC;
+--brass-dim:#9C7A45; --line:rgba(216,170,99,.22); --muted:rgba(212,217,220,.60);}
+html,body{background:#0B0807; color:var(--parchment);
+font-family:"Segoe UI",Arial,sans-serif; margin:0;}
+h1,h2,h3{font-family:Georgia,"Times New Roman",serif;}
+.wrap{max-width:1280px; margin:0 auto; padding:0 22px 60px;}
+.hidden{display:none!important;}
+.banner-wrapper{position:relative; background:#0B0807; display:flex;
+justify-content:center; max-width:900px; margin:0 auto; overflow:hidden;}
+.banner-img{display:block; width:100%;
+-webkit-mask-image:radial-gradient(ellipse 85% 70% at 50% 50%, black 45%, transparent 96%);
+mask-image:radial-gradient(ellipse 85% 70% at 50% 50%, black 45%, transparent 96%);}
+.banner-wrapper::after{content:''; position:absolute; inset:0; pointer-events:none;
+background:radial-gradient(ellipse 70% 60% at 50% 50%, transparent 35%, #0B0807 92%);}
+.hero{background:transparent; border:none; box-shadow:none; padding:6px 0 18px;}
+.hero-inner{max-width:1280px; margin:0 auto; padding:0 22px;
+display:flex; align-items:center; gap:26px; flex-wrap:wrap;}
+.emblem{width:100px; height:auto; flex:0 0 auto; opacity:.95;}
+.brand h1{margin:0; font-size:34px; letter-spacing:.14em;}
+.brand .sub{margin:4px 0 0; color:var(--brass); letter-spacing:.22em;
+font-size:12px; text-transform:uppercase;}
+.grid{display:grid; grid-template-columns:minmax(0,5fr) minmax(0,4fr); gap:26px;}
+@media (max-width:980px){.grid{grid-template-columns:1fr;}}
+.card{background:linear-gradient(180deg,#2C1712,#231310); border:1px solid var(--frame);
+border-radius:14px; padding:22px; margin-bottom:22px; box-shadow:0 12px 30px rgba(0,0,0,.45);}
+.card h2{margin:0 0 14px; font-size:19px; letter-spacing:.10em;}
+.step{margin:34px 0 10px; padding-bottom:8px; border-bottom:1px solid var(--frame);
+color:var(--brass); font-size:11px; letter-spacing:.18em; text-transform:uppercase;}
+.card .step:first-of-type{margin-top:6px;}
+.opt{display:flex; justify-content:space-between; gap:12px; align-items:center;
+padding:8px 10px; border:1px solid transparent; border-radius:8px; cursor:pointer;}
+.opt:hover{border-color:var(--line); background:rgba(216,170,99,.06);}
+.opt input{accent-color:var(--brass); margin-right:10px;}
+.opt .price{color:var(--muted); font-size:12px; white-space:nowrap;}
+.shell{display:inline-block; vertical-align:middle; margin-right:8px; opacity:.95;}
+#cfg input:disabled{opacity:.35; cursor:not-allowed;}
+.btn-ghost:disabled,.btn-brass:disabled{opacity:.45; cursor:not-allowed; filter:none;}
+.range-row{padding:8px 10px;}
+.range-row input[type=range]{width:100%; accent-color:var(--brass);}
+.range-head{display:flex; justify-content:space-between; font-size:13px;}
+.range-head output{color:var(--brass); font-variant-numeric:tabular-nums;}
+.presets{display:flex; gap:10px; flex-wrap:wrap; margin:0 0 22px;}
+.btn-ghost{background:transparent; border:1px solid var(--brass-dim); color:var(--brass);
+border-radius:10px; padding:9px 16px; font-size:13px; letter-spacing:.06em; cursor:pointer;}
+.btn-ghost:hover{background:rgba(216,170,99,.12);}
+.btn-brass{background:linear-gradient(180deg,#E7C078,#B08540); color:#1A120C;
+border:1px solid #F0D9A6; border-radius:10px; padding:12px 22px; font-size:14px;
+font-weight:600; letter-spacing:.08em; cursor:pointer; width:100%;}
+.btn-brass:hover{filter:brightness(1.07);}
+table{width:100%; border-collapse:collapse; font-size:13.5px;}
+td{padding:7px 8px; border-bottom:1px dashed rgba(84,44,27,.85);}
+td.num{text-align:right; font-variant-numeric:tabular-nums;}
+td.lbl{color:rgba(212,217,220,.82);}
+.slice-box{background:radial-gradient(circle at 50% 42%, #2C1712 0%, #0B0807 75%);
+border:1px solid var(--frame); border-radius:12px; padding:10px; text-align:center;}
+.slice-box img{width:100%; max-width:100%; height:auto; display:block;
+margin:0 auto; border-radius:10px;}
+.tube-thumb{width:130px; margin:12px auto 0; display:block;
+border-radius:10px; border:1px solid var(--frame);}
+.tube-stub{width:230px; margin:12px auto 0; padding:14px 12px;
+border:1px dashed var(--brass-dim); border-radius:10px; color:var(--brass);
+font-size:12px; letter-spacing:.06em; text-align:center; background:rgba(216,170,99,.06);}
+.summary{margin-top:10px; color:var(--muted); font-size:12.5px;}
+.days-big{font-size:30px; color:var(--brass);}
+.total-big{font-size:32px; font-variant-numeric:tabular-nums;}
+.verify-ok{border:1px solid var(--brass-dim); color:var(--brass); background:rgba(216,170,99,.08);
+border-radius:8px; padding:9px 12px; font-size:12.5px; letter-spacing:.06em;}
+.verify-bad{border:1px solid #7E3B32; color:#E08A7C; background:rgba(126,59,50,.12);
+border-radius:8px; padding:9px 12px; font-size:12.5px;}
+.muted{color:var(--muted); font-size:12.5px;}
+footer{border-top:1px solid var(--frame); margin-top:30px; padding-top:16px;
+color:var(--muted); font-size:12px; letter-spacing:.08em;}
+.overlay{position:fixed; inset:0; background:rgba(5,3,2,.72); display:flex;
+align-items:center; justify-content:center; z-index:50; padding:18px;}
+.overlay.hidden{display:none;}
+.modal{width:min(460px,94vw); margin:0;}
+.modal label{display:block; margin:12px 0 4px; font-size:12px; letter-spacing:.08em;
+color:var(--brass); text-transform:uppercase;}
+.modal input,.modal textarea{width:100%; box-sizing:border-box; background:#1D0F0B;
+border:1px solid var(--frame); border-radius:8px; color:var(--parchment);
+padding:10px 12px; font-size:14px; font-family:inherit;}
+.modal textarea{resize:vertical;}
+.modal input:focus,.modal textarea:focus{outline:1px solid var(--brass-dim);}
+.modal .row{display:flex; gap:10px; margin-top:16px;}
+.toast{position:fixed; left:50%; bottom:34px; transform:translateX(-50%);
+background:linear-gradient(180deg,#E7C078,#B08540); color:#1A120C;
+border:1px solid #F0D9A6; border-radius:12px; padding:14px 26px; font-size:14px;
+font-weight:600; letter-spacing:.06em; box-shadow:0 14px 40px rgba(0,0,0,.55);
+z-index:60; animation:tin .35s ease;}
+@keyframes tin{from{opacity:0; transform:translate(-50%,12px);}
+to{opacity:1; transform:translate(-50%,0);}}
 </style>
 </head>
 <body>
-
 <header class="hero">
   <div class="banner-wrapper">
     <img id="banner" class="banner-img" src="/banner.jpg" alt="ВИНЧЕСТЕРЪ: плашка бренда">
@@ -563,15 +609,15 @@ TEMPLATE = """
       </g>
       <g transform="rotate(24 110 70)">
         <rect x="18" y="62" width="120" height="15" rx="7.5" fill="#8E3942" stroke="#D8AA63" stroke-width="1.5"/>
-        <circle cx="42" cy="69" r="2" fill="#E8D9C6"/><circle cx="66" cy="66" r="1.6" fill="#E8D9C6"/>
-        <circle cx="90" cy="71" r="2.2" fill="#E8D9C6"/><circle cx="114" cy="67" r="1.5" fill="#E8D9C6"/>
+        <circle cx="42" cy="69" r="2" fill="#E8D9C6"/> <circle cx="66" cy="66" r="1.6" fill="#E8D9C6"/>
+        <circle cx="90" cy="71" r="2.2" fill="#E8D9C6"/> <circle cx="114" cy="67" r="1.5" fill="#E8D9C6"/>
         <path d="M138 62 L178 54 L186 70 L178 84 L138 77 Z" fill="#5A3A22" stroke="#D8AA63" stroke-width="1.5"/>
         <rect x="132" y="60" width="10" height="19" rx="3" fill="#D8AA63"/>
       </g>
       <g transform="rotate(-24 110 70)">
         <rect x="18" y="62" width="120" height="15" rx="7.5" fill="#8E3942" stroke="#D8AA63" stroke-width="1.5"/>
-        <circle cx="46" cy="70" r="2" fill="#E8D9C6"/><circle cx="72" cy="67" r="1.6" fill="#E8D9C6"/>
-        <circle cx="98" cy="71" r="2.2" fill="#E8D9C6"/><circle cx="120" cy="68" r="1.5" fill="#E8D9C6"/>
+        <circle cx="46" cy="70" r="2" fill="#E8D9C6"/> <circle cx="72" cy="67" r="1.6" fill="#E8D9C6"/>
+        <circle cx="98" cy="71" r="2.2" fill="#E8D9C6"/> <circle cx="120" cy="68" r="1.5" fill="#E8D9C6"/>
         <path d="M138 62 L178 54 L186 70 L178 84 L138 77 Z" fill="#5A3A22" stroke="#D8AA63" stroke-width="1.5"/>
         <rect x="132" y="60" width="10" height="19" rx="3" fill="#D8AA63"/>
       </g>
@@ -584,34 +630,28 @@ TEMPLATE = """
     </div>
   </div>
 </header>
-
 <div class="wrap">
   <div class="presets">
-    {% for p in presets %}
+{% for p in presets %}
     <button type="button" class="btn-ghost preset" data-key="{{ p.key }}" data-patch='{{ p.patch_json }}'>{{ p.label }}</button>
-    {% endfor %}
+{% endfor %}
   </div>
-
   <div class="grid">
     <div id="cfg">
       <div class="card">
         <h2>Конфигуратор партии</h2>
-
         <div class="step">Шаг I. Основа мяса</div>
         {% for key, m in meats.items() %}
         <label class="opt"><span><input type="radio" name="meat" value="{{ key }}" {{ 'checked' if cfg.meat == key }}>{{ m.label }}</span><span class="price">{{ m.price_per_kg }} ₽/кг</span></label>
         {% endfor %}
-
         <div class="step">Шаг II. Оружейный калибр (вес партии)</div>
         {% for key, c in calibers.items() %}
         <label class="opt"><span><input type="radio" name="caliber" value="{{ key }}" {{ 'checked' if cfg.caliber == key }}><svg class="shell" width="{{ c.icon_w }}" height="{{ c.icon_h }}" viewBox="0 0 44 20" preserveAspectRatio="none" aria-hidden="true"><rect x="0" y="2" width="28" height="16" rx="5" fill="#6E241E" stroke="#542C1B" stroke-width="1"/><rect x="28" y="1" width="15" height="18" rx="2" fill="#D8AA63"/><line x1="31" y1="1" x2="31" y2="19" stroke="#9C7A45" stroke-width="1.5"/></svg>{{ c.label }}</span><span class="price">{{ c.weight_g }} г</span></label>
         {% endfor %}
-
         <div class="step">Шаг III. Технология созревания</div>
         {% for key, t in techs.items() %}
         <label class="opt"><span><input type="radio" name="tech" value="{{ key }}" {{ 'checked' if cfg.tech == key }}>{{ t.label }}</span><span class="price">{{ t.base_days }} сут / +{{ t.markup_per_kg }} ₽/кг</span></label>
         {% endfor %}
-
         <div class="step">Шаг IV. Регулировка состава</div>
         <div class="range-row">
           <div class="range-head"><span>Содержание шпика</span><output id="fat_out">{{ cfg.fat }} %</output></div>
@@ -621,17 +661,14 @@ TEMPLATE = """
           <div class="range-head"><span>Интенсивность перца и пряностей</span><output id="spice_out">{{ '%.1f' % cfg.spice }} %</output></div>
           <input type="range" id="spice" min="0.5" max="3.0" step="0.1" value="{{ cfg.spice }}">
         </div>
-
         <div class="step">Шаг V. Крафтовые добавки</div>
         {% for key, a in addons.items() %}
         <label class="opt"><span><input type="checkbox" id="{{ key }}" {{ 'checked' if cfg[key] }}>{{ a.label }}</span><span class="price" id="price_{{ key }}">+{{ q.addon_prices_fmt[key] }}</span></label>
         {% endfor %}
-
         <div class="step">Шаг VI. Подарочная упаковка</div>
         <label class="opt"><span><input type="checkbox" id="tube" {{ 'checked' if cfg.tube }}>Подарочный тубус "Патрон 12 калибра" из мореного дуба с латунным донцем</span><span class="price">+{{ tube_price }} ₽</span></label>
       </div>
     </div>
-
     <div>
       <div class="card">
         <h2>Срез партии</h2>
@@ -640,7 +677,6 @@ TEMPLATE = """
         <div id="tube_stub" class="tube-stub hidden">Простите, но эту колбасу мы съели сразу, не успев сфотографировать.</div>
         <div class="summary" id="summary">{{ q.summary }}</div>
       </div>
-
       <div class="card">
         <h2>Срок созревания и выдачи</h2>
         <table>
@@ -650,7 +686,6 @@ TEMPLATE = """
         <div style="margin-top:12px">Длительность созревания: <span class="days-big" id="days">{{ q.days }} суток</span></div>
         <div class="muted" style="margin-top:6px">Ориентировочная дата готовности партии: <span id="ready_date">{{ q.ready_date }}</span></div>
       </div>
-
       <div class="card">
         <h2>Технологическая карта</h2>
         <table>
@@ -662,7 +697,6 @@ TEMPLATE = """
           <tr><td class="lbl"><strong>Итого масса партии (база + добавки)</strong></td><td class="num" id="weight_total"><strong>{{ q.total_fmt }}</strong></td></tr>
         </table>
       </div>
-
       <div class="card">
         <h2>Состав корзины</h2>
         <table>
@@ -680,17 +714,17 @@ TEMPLATE = """
       </div>
     </div>
   </div>
-
   <footer>ВИНЧЕСТЕРЪ | Оружейная колбасная гильдия | Камера созревания #048 | {{ build }}</footer>
 </div>
-
 <div id="overlay" class="overlay hidden">
   <div class="card modal">
     <h2>Заявка мастеру</h2>
     <div class="muted" id="modal_summary"></div>
-    <label for="f_name">Имя</label><input id="f_name" type="text" placeholder="Сергей">
-    <label for="f_phone">Телефон</label><input id="f_phone" type="tel" placeholder="+7 900 000-00-00">
-    <label for="f_email">Почта</label><input id="f_email" type="email" placeholder="name@domain.ru">
+    <label for="f_name">Имя</label> <input id="f_name" type="text" placeholder="Сергей">
+    <label for="f_phone">Телефон</label> <input id="f_phone" type="tel" placeholder="+7 900 000-00-00">
+    <label for="f_email">Почта</label> <input id="f_email" type="email" placeholder="name@domain.ru">
+    <label for="f_comment">Комментарий к заказу (необязательно)</label>
+    <textarea id="f_comment" rows="3" placeholder="Например: нужно доставить к 19:00 или аллергия на орехи"></textarea>
     <div id="modal_errors" class="verify-bad hidden" style="margin-top:12px"></div>
     <div class="row">
       <button type="button" class="btn-brass" id="modal_send">Оставить заявку</button>
@@ -698,9 +732,7 @@ TEMPLATE = """
     </div>
   </div>
 </div>
-
 <div id="toast" class="toast hidden"></div>
-
 <script>
 var STATE = {{ state_json | safe }};
 var DEFAULT_STATE = {{ default_json | safe }};
@@ -775,7 +807,7 @@ function updateTube() {
   img.className = "tube-thumb"; stub.className = "tube-stub hidden";
   if (img.dataset.loaded !== "1") { img.src = "/tube.png"; img.dataset.loaded = "1"; }
 }
-// Эталон набора (ред. 9): единственная пара функций, без обращений к удаленным узлам.
+// Эталон набора: единственная пара функций, без обращений к удаленным узлам.
 function showSet(key, label) { SET_KEY = key; }
 function hideSet() { SET_KEY = null; }
 function refresh() {
@@ -799,8 +831,9 @@ function showToast(msg) {
   clearTimeout(t._h);
   t._h = setTimeout(function () { t.className = "toast hidden"; }, 6000);
 }
+// ГЛАВНЫЙ обработчик пересчёта: любое изменение формы -> скрыть эталон, прочитать, перерисовать.
 document.addEventListener("change", function (e) {
-  if (e.target.matches && e.target.matches("#cfg input")) { hideSet(); readForm(); refresh(); }
+  if (e.target.matches("#cfg input")) { hideSet(); readForm(); refresh(); }
 });
 ["fat", "spice"].forEach(function (id) {
   document.getElementById(id).addEventListener("input", paintSliders);
@@ -827,31 +860,33 @@ document.getElementById("send").addEventListener("click", openModal);
 document.getElementById("modal_cancel").addEventListener("click", closeModal);
 overlay.addEventListener("click", function (e) { if (e.target === overlay) closeModal(); });
 document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeModal(); });
+// ЕДИНСТВЕННЫЙ обработчик отправки заявки (с комментарием).
 document.getElementById("modal_send").addEventListener("click", function () {
   var body = JSON.parse(JSON.stringify(STATE));
   body.name = document.getElementById("f_name").value;
   body.phone = document.getElementById("f_phone").value;
   body.email = document.getElementById("f_email").value;
+  body.comment = document.getElementById("f_comment").value;
   fetch("/api/order", {method: "POST", headers: {"Content-Type": "application/json"},
-                       body: JSON.stringify(body)})
-    .then(function (r) { return r.json(); })
-    .then(function (res) {
-      if (res.ok) {
-        closeModal();
-        setLocked(true);
-        showToast("Благодарим за заказ! В ближайшее время мастер свяжется с Вами.");
-        var st = document.getElementById("order_status");
-        st.textContent = "Заявка принята. Партия " + res.order_no +
-          " зафиксирована. Мастер свяжется с вами.";
-        st.className = "verify-ok";
-        document.getElementById("new_batch_wrap").className = "";
-      } else {
-        var box = document.getElementById("modal_errors");
-        box.className = "verify-bad";
-        box.innerHTML = Object.keys(res.errors).map(function (k) {
-          return "<div>" + res.errors[k] + "</div>"; }).join("");
-      }
-    });
+    body: JSON.stringify(body)})
+  .then(function (r) { return r.json(); })
+  .then(function (res) {
+    if (res.ok) {
+      closeModal();
+      setLocked(true);
+      showToast("Благодарим за заказ! В ближайшее время мастер свяжется с Вами.");
+      var st = document.getElementById("order_status");
+      st.textContent = "Заявка принята. Партия " + res.order_no +
+        " зафиксирована. Мастер свяжется с вами.";
+      st.className = "verify-ok";
+      document.getElementById("new_batch_wrap").className = "";
+    } else {
+      var box = document.getElementById("modal_errors");
+      box.className = "verify-bad";
+      box.innerHTML = Object.keys(res.errors).map(function (k) {
+        return "<div>" + res.errors[k] + "</div>"; }).join("");
+    }
+  });
 });
 document.getElementById("new_batch").addEventListener("click", function () {
   STATE = JSON.parse(JSON.stringify(DEFAULT_STATE));
@@ -879,10 +914,10 @@ updateTube();
 </html>
 """
 
-
 # ============================================================================
 # СЛОЙ 5. АВТО-QA И ТОЧКА ВХОДА
 # ============================================================================
+
 
 def run_self_tests():
     """АВТО-QA ПРИ СТАРТЕ: эталонные кейсы по истории багов СА."""
@@ -913,7 +948,7 @@ def run_self_tests():
     bad = parse_config({"fat": "99", "spice": "abc", "meat": "xenon"})
     check("защита от дурака: клампы и дефолты (fat=99->30, мусор->дефолт)",
           bad.fat == 30 and bad.spice == DEFAULT.spice and bad.meat == DEFAULT.meat)
-    _, _, _, errs = _validate_contact({"name": "С", "phone": "12", "email": "foo"})
+    _, _, _, _, errs = _validate_contact({"name": "С", "phone": "12", "email": "foo"})
     check("валидация контактов: мусор отклонен по всем трем полям", len(errs) == 3, len(errs))
     try:
         png = render_slice(DEFAULT)
@@ -923,7 +958,7 @@ def run_self_tests():
     except Exception as exc:
         check("срез: подстановка/заглушка", False, repr(exc))
     print("-" * 64)
-    found = sum(1 for p in list(PHOTOS.values()) + list(SETS.values()) + ["pack_tube.png"]
+    found = sum(1 for p in list(PHOTOS.values()) + list(SETS.values()) + ["pack_tube.jpg"]
                 if _resolve_asset(p))
     print(f"[QA] INFO | нейрофото найдено: {found}/17")
     print(f"[QA] INFO | папка проекта: {BASE_DIR}")
