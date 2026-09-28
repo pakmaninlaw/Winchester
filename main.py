@@ -600,9 +600,13 @@ font-weight:600; letter-spacing:.06em; box-shadow:0 14px 40px rgba(0,0,0,.55);
 z-index:60; animation:tin .35s ease;}
 @keyframes tin{from{opacity:0; transform:translate(-50%,12px);}
 to{opacity:1; transform:translate(-50%,0);}}
+.back-home{position:fixed; top:14px; left:14px; z-index:50; color:var(--brass); text-decoration:none; font-size:13px;
+  padding:6px 14px; border:1px solid var(--frame); border-radius:18px; background:rgba(11,8,7,.75); transition:background .2s, color .2s;}
+.back-home:hover{background:var(--frame); color:var(--parchment);}
 </style>
 </head>
 <body>
+{% if request.script_root %}<a class="back-home" href="/" title="Вернуться к списку проектов">&larr; Все проекты</a>{% endif %}
 <header class="hero">
   <div class="banner-wrapper">
     <img id="banner" class="banner-img" src="{{ request.script_root }}/banner.jpg" alt="ВИНЧЕСТЕРЪ: плашка бренда">
