@@ -23,6 +23,8 @@ from markupsafe import escape
 from PIL import Image, ImageDraw
 
 app = Flask(__name__)
+# Публичный деплой: служебные страницы (журнал заявок, отладка) недоступны извне
+PUBLIC_MODE = os.environ.get("WINCHESTER_PUBLIC") == "1"
 BUILD = "ред. 11 (jpg-ассеты, комментарий в заявке)"
 PORT = 5000
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # деплой: пути от файла, не от cwd
@@ -447,7 +449,9 @@ def banner_local():
 
 @app.route("/admin/orders")
 def admin_orders():
-    """Журнал заявок таблицей. ВНИМАНИЕ: страница публичная -- не свети ссылкой."""
+    """Журнал заявок таблицей. В публичной версии (WINCHESTER_PUBLIC=1) закрыт: там персональные данные."""
+    if PUBLIC_MODE:
+        abort(404)
     orders = _load_orders()
     rows = []
     for o in reversed(orders):
@@ -478,6 +482,8 @@ def admin_orders():
 @app.route("/api/debug")
 def debug_info():
     """Форензика: что именно исполняется. Открой в браузере и пришли мне."""
+    if PUBLIC_MODE:
+        abort(404)
     return jsonify({"build": BUILD, "python": sys.version.split()[0],
                     "pillow": getattr(Image, "version", "unknown"),
                     "orders_file": ORDERS_FILE,
@@ -599,7 +605,7 @@ to{opacity:1; transform:translate(-50%,0);}}
 <body>
 <header class="hero">
   <div class="banner-wrapper">
-    <img id="banner" class="banner-img" src="/banner.jpg" alt="ВИНЧЕСТЕРЪ: плашка бренда">
+    <img id="banner" class="banner-img" src="{{ request.script_root }}/banner.jpg" alt="ВИНЧЕСТЕРЪ: плашка бренда">
   </div>
   <div class="hero-inner">
     <svg class="emblem" viewBox="0 0 220 140" aria-hidden="true">
@@ -672,7 +678,7 @@ to{opacity:1; transform:translate(-50%,0);}}
     <div>
       <div class="card">
         <h2>Срез партии</h2>
-        <div class="slice-box"><img id="slice" src="/api/slice.png?{{ slice_qs }}" alt="Срез батона"></div>
+        <div class="slice-box"><img id="slice" src="{{ request.script_root }}/api/slice.png?{{ slice_qs }}" alt="Срез батона"></div>
         <img id="tube_img" class="tube-thumb hidden" alt="Подарочный тубус">
         <div id="tube_stub" class="tube-stub hidden">Простите, но эту колбасу мы съели сразу, не успев сфотографировать.</div>
         <div class="summary" id="summary">{{ q.summary }}</div>
@@ -734,6 +740,7 @@ to{opacity:1; transform:translate(-50%,0);}}
 </div>
 <div id="toast" class="toast hidden"></div>
 <script>
+var ROOT = {{ request.script_root | tojson }};  // префикс, если магазин открыт не в корне сайта
 var STATE = {{ state_json | safe }};
 var DEFAULT_STATE = {{ default_json | safe }};
 var LAST_Q = {{ quote_json | safe }};
@@ -805,7 +812,7 @@ function updateTube() {
   var img = document.getElementById("tube_img"), stub = document.getElementById("tube_stub");
   if (!STATE.tube) { img.className = "tube-thumb hidden"; stub.className = "tube-stub hidden"; return; }
   img.className = "tube-thumb"; stub.className = "tube-stub hidden";
-  if (img.dataset.loaded !== "1") { img.src = "/tube.png"; img.dataset.loaded = "1"; }
+  if (img.dataset.loaded !== "1") { img.src = ROOT + "/tube.png"; img.dataset.loaded = "1"; }
 }
 // Эталон набора: единственная пара функций, без обращений к удаленным узлам.
 function showSet(key, label) { SET_KEY = key; }
@@ -814,15 +821,15 @@ function refresh() {
   updateTube();
   var img = document.getElementById("slice");
   if (SET_KEY) {
-    img.src = "/set/" + SET_KEY + ".png";
+    img.src = ROOT + "/set/" + SET_KEY + ".png";
     img.alt = "Эталон гастрономического набора";
   } else {
-    img.src = "/api/slice.png?" + buildQS() + "&v=" + Date.now();
+    img.src = ROOT + "/api/slice.png?" + buildQS() + "&v=" + Date.now();
     img.alt = "Срез батона";
   }
   var st = document.getElementById("order_status");
   st.textContent = ""; st.className = "muted";
-  fetch("/api/quote?" + buildQS()).then(function (r) { return r.json(); }).then(applyQuote);
+  fetch(ROOT + "/api/quote?" + buildQS()).then(function (r) { return r.json(); }).then(applyQuote);
 }
 function showToast(msg) {
   var t = document.getElementById("toast");
@@ -867,7 +874,7 @@ document.getElementById("modal_send").addEventListener("click", function () {
   body.phone = document.getElementById("f_phone").value;
   body.email = document.getElementById("f_email").value;
   body.comment = document.getElementById("f_comment").value;
-  fetch("/api/order", {method: "POST", headers: {"Content-Type": "application/json"},
+  fetch(ROOT + "/api/order", {method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify(body)})
   .then(function (r) { return r.json(); })
   .then(function (res) {
